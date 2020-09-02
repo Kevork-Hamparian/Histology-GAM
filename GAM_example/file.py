@@ -17,6 +17,7 @@ data = mnist_data()
 data_loader = torch.utils.data.DataLoader(data, batch_size=100, shuffle=True)
 # Num batches
 num_batches = len(data_loader)
+print(num_batches)
 
 class DiscriminatorNet(torch.nn.Module):
     """
