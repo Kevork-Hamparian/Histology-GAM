@@ -11,6 +11,9 @@ import time
 
 import tensorflow as tf
 
+from image_read import load_images_from_folder
+
+
 physical_devices = tf.config.list_physical_devices('GPU')
 try:
   tf.config.experimental.set_memory_growth(physical_devices[0], True)
@@ -56,3 +59,7 @@ generated_image = generator(noise, training=False)
 
 noise_im=plt.imshow(generated_image[0, :, :, 0], cmap='gray')
 plt.savefig('image.tif')
+
+
+images=load_images_from_folder(r'C:\Users\Kevork\Documents\Histology-GAM\BACH_images')
+# %%
