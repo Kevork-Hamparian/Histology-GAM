@@ -1,168 +1,64 @@
-import tensorflow as tf
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ICIAR2018 - Grand Challenge on Breast Cancer Histology Images
+https://iciar2018-challenge.grand-challenge.org/home/
+"""
 
-import glob
-import imageio
-import matplotlib.pyplot as plt
+import openslide
+from matplotlib import pyplot as plt
+from scipy.misc import imsave, imresize
+from openslide import open_slide # http://openslide.org/api/python/
 import numpy as np
 import os
-import PIL
-from tensorflow.keras import layers
-import time
 
 
-physical_devices = tf.config.list_physical_devices('GPU')
-try:
-  tf.config.experimental.set_memory_growth(physical_devices[0], True)
-except:
-  # Invalid device or cannot modify virtual devices once initialized.
-  pass
+save = True
 
-tf.__version__
+dir_img = 'PATH TO THE DATASET FOLDER'
+dir_img = '/home/tfaraujo/Desktop/BreastHistologyChallenge/ICIAR2018_BACH_Challenge/WSI/'
 
-(train_images, train_labels), (_, _) = tf.keras.datasets.mnist.load_data()
-train_images = train_images.reshape(train_images.shape[0], 28, 28, 1).astype('float32')
-train_images = (train_images - 127.5) / 127.5 # Normalize the images to [-1, 1]
+valid_images = ['.svs']
 
-BUFFER_SIZE = 60000
-BATCH_SIZE = 256
+patch_size = (2000,2000)
 
-# Batch and shuffle the data
-train_dataset = tf.data.Dataset.from_tensor_slices(train_images).shuffle(BUFFER_SIZE).batch(BATCH_SIZE)
+for f in os.listdir(dir_img):
+    ext = os.path.splitext(f)[1]
+    if ext.lower() not in valid_images:
+        continue
+    curr_path = os.path.join(dir_img,f)
+    print(curr_path)
+    
+    # open scan
+    scan = openslide.OpenSlide(curr_path)
+    
+    orig_w = np.int(scan.properties.get('aperio.OriginalWidth'))
+    orig_h = np.int(scan.properties.get('aperio.OriginalHeight'))
+    
+    # create an array to store our image
+    img_np = np.zeros((orig_w,orig_h,3),dtype=np.uint8)
 
-def make_generator_model():
-    model = tf.keras.Sequential()
-    model.add(layers.Dense(7*7*256, use_bias=False, input_shape=(100,)))
-    model.add(layers.BatchNormalization())
-    model.add(layers.LeakyReLU())
-
-    model.add(layers.Reshape((7, 7, 256)))
-    assert model.output_shape == (None, 7, 7, 256) # Note: None is the batch size
-
-    model.add(layers.Conv2DTranspose(128, (5, 5), strides=(1, 1), padding='same', use_bias=False))
-    assert model.output_shape == (None, 7, 7, 128)
-    model.add(layers.BatchNormalization())
-    model.add(layers.LeakyReLU())
-
-    model.add(layers.Conv2DTranspose(64, (5, 5), strides=(2, 2), padding='same', use_bias=False))
-    assert model.output_shape == (None, 14, 14, 64)
-    model.add(layers.BatchNormalization())
-    model.add(layers.LeakyReLU())
-
-    model.add(layers.Conv2DTranspose(1, (5, 5), strides=(2, 2), padding='same', use_bias=False, activation='tanh'))
-    assert model.output_shape == (None, 28, 28, 1)
-
-    return model
-
-generator = make_generator_model()
-
-noise = tf.random.normal([1, 100])
-generated_image = generator(noise, training=False)
-
-plt.imshow(generated_image[0, :, :, 0], cmap='gray')
-
-def make_discriminator_model():
-    model = tf.keras.Sequential()
-    model.add(layers.Conv2D(64, (5, 5), strides=(2, 2), padding='same',
-                                     input_shape=[28, 28, 1]))
-    model.add(layers.LeakyReLU())
-    model.add(layers.Dropout(0.3))
-
-    model.add(layers.Conv2D(128, (5, 5), strides=(2, 2), padding='same'))
-    model.add(layers.LeakyReLU())
-    model.add(layers.Dropout(0.3))
-
-    model.add(layers.Flatten())
-    model.add(layers.Dense(1))
-
-    return model
-
-discriminator = make_discriminator_model()
-decision = discriminator(generated_image)
-print (decision)
-
-cross_entropy = tf.keras.losses.BinaryCrossentropy(from_logits=True)
+    for r in range(0,orig_w,patch_size[0]):
+        for c in range(0, orig_h,patch_size[1]):
+            if c+patch_size[1] > orig_h and r+patch_size[0]<= orig_w:
+                p = orig_h-c
+                img = np.array(scan.read_region((c,r),0,(p,patch_size[1])),dtype=np.uint8)[...,0:3]
+            elif c+patch_size[1] <= orig_h and r+patch_size[0] > orig_w:
+                p = orig_w-r
+                img = np.array(scan.read_region((c,r),0,(patch_size[0],p)),dtype=np.uint8)[...,0:3]
+            elif  c+patch_size[1] > orig_h and r+patch_size[0] > orig_w:
+                p = orig_h-c
+                pp = orig_w-r
+                img = np.array(scan.read_region((c,r),0,(p,pp)),dtype=np.uint8)[...,0:3]
+            else:    
+                img = np.array(scan.read_region((c,r),0,(patch_size[0],patch_size[1])),dtype=np.uint8)[...,0:3]
+            img_np[r:r+patch_size[0],c:c+patch_size[1]] = img
 
 
-def discriminator_loss(real_output, fake_output):
-    real_loss = cross_entropy(tf.ones_like(real_output), real_output)
-    fake_loss = cross_entropy(tf.zeros_like(fake_output), fake_output)
-    total_loss = real_loss + fake_loss
-    return total_loss
-
-def generator_loss(fake_output):
-    return cross_entropy(tf.ones_like(fake_output), fake_output)
-
-generator_optimizer = tf.keras.optimizers.Adam(1e-4)
-discriminator_optimizer = tf.keras.optimizers.Adam(1e-4)
-
-EPOCHS = 50
-noise_dim = 100
-num_examples_to_generate = 16
-
-# We will reuse this seed overtime (so it's easier)
-# to visualize progress in the animated GIF)
-seed = tf.random.normal([num_examples_to_generate, noise_dim])
-
-# Notice the use of `tf.function`
-# This annotation causes the function to be "compiled".
-@tf.function
-def train_step(images):
-    noise = tf.random.normal([BATCH_SIZE, noise_dim])
-
-    with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
-      generated_images = generator(noise, training=True)
-
-      real_output = discriminator(images, training=True)
-      fake_output = discriminator(generated_images, training=True)
-
-      gen_loss = generator_loss(fake_output)
-      disc_loss = discriminator_loss(real_output, fake_output)
-
-    gradients_of_generator = gen_tape.gradient(gen_loss, generator.trainable_variables)
-    gradients_of_discriminator = disc_tape.gradient(disc_loss, discriminator.trainable_variables)
-
-    generator_optimizer.apply_gradients(zip(gradients_of_generator, generator.trainable_variables))
-    discriminator_optimizer.apply_gradients(zip(gradients_of_discriminator, discriminator.trainable_variables))
-
-def train(dataset, epochs):
-  for epoch in range(epochs):
-    start = time.time()
-
-    for image_batch in dataset:
-      train_step(image_batch)
-
-    # Produce images for the GIF as we go
-    display.clear_output(wait=True)
-    generate_and_save_images(generator, epoch + 1, seed)
-
-    # Save the model every 15 epochs
-    if (epoch + 1) % 15 == 0:
-      checkpoint.save(file_prefix = checkpoint_prefix)
-
-    print ('Time for epoch {} is {} sec'.format(epoch + 1, time.time()-start))
-
-  # Generate after the final epoch
-  display.clear_output(wait=True)
-  generate_and_save_images(generator,
-                           epochs,
-                           seed)
-
-
-def generate_and_save_images(model, epoch, test_input):
-  # Notice `training` is set to False.
-  # This is so all layers run in inference mode (batchnorm).
-  predictions = model(test_input, training=False)
-
-  fig = plt.figure(figsize=(4,4))
-
-  for i in range(predictions.shape[0]):
-      plt.subplot(4, 4, i+1)
-      plt.imshow(predictions[i, :, :, 0] * 127.5 + 127.5, cmap='gray')
-      plt.axis('off')
-
-  plt.savefig('image_at_epoch_{:04d}.png'.format(epoch))
-  plt.show()
-
-  train(train_dataset, EPOCHS)
-
-  checkpoint.restore(tf.train.latest_checkpoint(checkpoint_dir))
+    if save:
+        name_no_ext = os.path.splitext(f)[0]
+        np.save(dir_img + name_no_ext, img_np)
+        
+    scan.close
+    
+    
